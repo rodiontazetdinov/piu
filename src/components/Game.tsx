@@ -1,3 +1,4 @@
+//@ts-nocheck
 import React, { useEffect, useRef, useReducer, useState, useCallback } from 'react';
 import player2ImageLink from '../assets/superhero_2503200.png';
 import player1ImageLink from '../assets/superhero_4402821.png';
@@ -11,6 +12,8 @@ const PLAYER_SPEED = 10;
 const INITIAL_LIVES = 3;
 const EXPLOSION_DURATION = 60;
 const RELOAD_TIME = 3000; // 3 секунды в миллисекундах
+const MAX_LASERS = 50;
+const MAX_EXPLOSIONS = 10;
 
 const initialState = {
   player1: { x: 0, y: 0, lives: INITIAL_LIVES, canShoot: true, reloadProgress: 100 },
@@ -46,7 +49,7 @@ function gameReducer(state, action) {
           y: action.player === 'player1' ? state[action.player].y - LASER_HEIGHT : state[action.player].y + PLAYER_HEIGHT,
           height: action.height,
           player: action.player
-        }]
+        }].slice(-MAX_LASERS)
       };
     case 'UPDATE_RELOAD':
       return {
@@ -63,43 +66,53 @@ function gameReducer(state, action) {
         }
       };
     case 'UPDATE_LASERS':
-      let newState = { ...state };
-      const newLasers = [];
-
-      for (let laser of state.lasers) {
+      const newLasers = state.lasers.reduce((acc, laser) => {
         const newY = laser.player === 'player1' ? laser.y - LASER_SPEED : laser.y + LASER_SPEED;
         const targetPlayer = laser.player === 'player1' ? 'player2' : 'player1';
         
-        if (checkCollision({ ...laser, y: newY }, newState[targetPlayer])) {
+        if (checkCollision({ ...laser, y: newY }, state[targetPlayer])) {
           // Нанесение урона при попадании
-          newState[targetPlayer] = {
-            ...newState[targetPlayer],
-            lives: newState[targetPlayer].lives - 1
+          return {
+            lasers: acc.lasers,
+            players: {
+              ...acc.players,
+              [targetPlayer]: {
+                ...acc.players[targetPlayer],
+                lives: acc.players[targetPlayer].lives - 1
+              }
+            },
+            explosions: acc.players[targetPlayer].lives <= 1 ? [
+              ...acc.explosions,
+              {
+                x: state[targetPlayer].x + PLAYER_WIDTH / 2,
+                y: state[targetPlayer].y + PLAYER_HEIGHT / 2,
+                frame: 0
+              }
+            ] : acc.explosions
           };
-          
-          // Добавление взрыва, если жизни закончились
-          if (newState[targetPlayer].lives <= 0) {
-            newState.explosions.push({
-              x: newState[targetPlayer].x + PLAYER_WIDTH / 2,
-              y: newState[targetPlayer].y + PLAYER_HEIGHT / 2,
-              frame: 0
-            });
-          }
         } else if (
           (laser.player === 'player1' && newY + laser.height >= 0) ||
           (laser.player === 'player2' && newY <= action.height)
         ) {
-          // Если лазер не попал и не вышел за пределы экрана, сохраняем его
-          newLasers.push({ ...laser, y: newY });
+          return {
+            ...acc,
+            lasers: [...acc.lasers, { ...laser, y: newY }]
+          };
         }
-      }
+        return acc;
+      }, { lasers: [], players: state, explosions: state.explosions });
 
-      newState.lasers = newLasers;
-      return newState;
+      return {
+        ...state,
+        ...newLasers.players,
+        lasers: newLasers.lasers,
+        explosions: newLasers.explosions
+      };
     case 'UPDATE_EXPLOSIONS':
       const updatedExplosions = state.explosions
         .map(explosion => ({ ...explosion, frame: explosion.frame + 1 }))
-        .filter(explosion => explosion.frame < EXPLOSION_DURATION);
+        .filter(explosion => explosion.frame < EXPLOSION_DURATION)
+        .slice(-MAX_EXPLOSIONS);
       
       return {
         ...state,
@@ -127,7 +140,7 @@ function checkCollision(laser, player) {
 }
 
 const Game = () => {
-  const canvasRef = useRef(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [state, dispatch] = useReducer(gameReducer, initialState);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [images, setImages] = useState({ player1: null, player2: null });
@@ -172,6 +185,8 @@ const Game = () => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
 
+    let animationFrameId;
+
     const gameLoop = () => {
       ctx.clearRect(0, 0, dimensions.width, dimensions.height);
 
@@ -205,13 +220,15 @@ const Game = () => {
 
       // Отрисовка лазеров
       ctx.fillStyle = 'yellow';
+      ctx.beginPath();
       state.lasers.forEach(laser => {
         if (laser.player === 'player1') {
-          ctx.fillRect(laser.x, laser.y, LASER_WIDTH, -laser.height);
+          ctx.rect(laser.x, laser.y, LASER_WIDTH, -laser.height);
         } else {
-          ctx.fillRect(laser.x, laser.y, LASER_WIDTH, laser.height);
+          ctx.rect(laser.x, laser.y, LASER_WIDTH, laser.height);
         }
       });
+      ctx.fill();
 
       // Отрисовка взрывов
       state.explosions.forEach(explosion => {
@@ -229,10 +246,14 @@ const Game = () => {
       ctx.fillText(`Зеленый: ${state.player1.lives}`, 10, dimensions.height - 30); // Подняли текст на 20 пикселей выше
       ctx.fillText(`Красный: ${state.player2.lives}`, dimensions.width - 120, 30);
 
-      requestAnimationFrame(gameLoop);
+      animationFrameId = requestAnimationFrame(gameLoop);
     };
 
     gameLoop();
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
   }, [state, dimensions, images]);
 
   useEffect(() => {
@@ -314,23 +335,25 @@ const Game = () => {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    canvas.addEventListener('mousedown', handleMouseDown);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseup', handleMouseUp);
-    canvas.addEventListener('mouseleave', handleMouseUp);
-    canvas.addEventListener('touchstart', handleTouchStart);
-    canvas.addEventListener('touchmove', handleTouchMove);
-    canvas.addEventListener('touchend', handleTouchEnd);
+    if (canvas) {
+      canvas.addEventListener('mousedown', handleMouseDown);
+      canvas.addEventListener('mousemove', handleMouseMove);
+      canvas.addEventListener('mouseup', handleMouseUp);
+      canvas.addEventListener('mouseleave', handleMouseUp);
+      canvas.addEventListener('touchstart', handleTouchStart);
+      canvas.addEventListener('touchmove', handleTouchMove);
+      canvas.addEventListener('touchend', handleTouchEnd);
 
-    return () => {
-      canvas.removeEventListener('mousedown', handleMouseDown);
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseup', handleMouseUp);
-      canvas.removeEventListener('mouseleave', handleMouseUp);
-      canvas.removeEventListener('touchstart', handleTouchStart);
-      canvas.removeEventListener('touchmove', handleTouchMove);
-      canvas.removeEventListener('touchend', handleTouchEnd);
-    };
+      return () => {
+        canvas.removeEventListener('mousedown', handleMouseDown);
+        canvas.removeEventListener('mousemove', handleMouseMove);
+        canvas.removeEventListener('mouseup', handleMouseUp);
+        canvas.removeEventListener('mouseleave', handleMouseUp);
+        canvas.removeEventListener('touchstart', handleTouchStart);
+        canvas.removeEventListener('touchmove', handleTouchMove);
+        canvas.removeEventListener('touchend', handleTouchEnd);
+      };
+    }
   }, [handleMouseDown, handleMouseMove, handleMouseUp, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
   const handleRestart = useCallback(() => {
